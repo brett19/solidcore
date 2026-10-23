@@ -27,8 +27,10 @@
 //! The shim refuses (`-2`) the inputs where upstream dereferences null; the Rust side
 //! returns [`SolidError::InvalidInput`] there and both report `refused` (a both-errored
 //! case). A topology case whose evaluated geometry the import holds only as its B-spline
-//! part (analytic surfaces and curves) is deferred as `topology.edgeuse_p2`'s runner
-//! defers it.
+//! part is deferred as `topology.edgeuse_p2`'s runner defers it: an analytic face surface
+//! the export could not carry exactly (`ImportTypes::inexact_surface`; cones, cylinders,
+//! spheres, tori, revolutions and extrusions normally travel as their exact record), or an
+//! analytic edge curve.
 
 use std::collections::BTreeMap;
 
@@ -62,8 +64,8 @@ use super::blend_fillet_geom_p1::{
 
 use super::topology_edgeuse_p1::{
     brep_block_of, bspline_of, domain, flag, gen_brep, gen_curve, gen_surface, harness,
-    import_with_types, path_of, push_curve, push_surface, sel, surface_of, BrepIn, CrvIn,
-    ImportTypes, SrfIn,
+    import_with_types, path_of, push_curve, push_surface, sel, surface_class_name, surface_of,
+    BrepIn, CrvIn, ImportTypes, SrfIn,
 };
 use crate::{Case, HarnessError, Output, Rng, UnitDiff};
 
@@ -646,33 +648,18 @@ pub(super) fn inexact(t: &Topo, edges: &[EdgeId], eus: &[EdgeuseId]) -> Option<O
             let st = eu1::face(b, e)
                 .ok()
                 .flatten()
-                .and_then(|f| t.types.face_surface_types.get(f.index() as usize).copied())
+                .and_then(|f| t.types.inexact_surface(f.index() as usize))
                 .unwrap_or(-1);
             if st >= 0 && !EXACT_SURFACES.contains(&st) {
-                let (unit, symbol) = match st {
-                    15012 => ("surface.surface_p2", "SurfaceKind::Cone (SmCone dispatch)"),
-                    15013 => (
-                        "surface.surface_p2",
-                        "SurfaceKind::Cone (SmCylinder dispatch)",
+                // an analytic face surface the export could not carry exactly (its
+                // record is not lossless): the import holds its B-spline part
+                return Some(Output::deferred(
+                    HARNESS_ANALYTIC_EXPORT,
+                    format!(
+                        "{} face surface not exported exactly",
+                        surface_class_name(st)
                     ),
-                    15014 => (
-                        "surface.surface_p2",
-                        "SurfaceKind::Sphere (SmSphere dispatch)",
-                    ),
-                    15015 => (
-                        "surface.surface_p2",
-                        "SurfaceKind::Torus (SmTorus dispatch)",
-                    ),
-                    15030 => (
-                        "surface.surf_of_extrusion_p2",
-                        "SurfaceKind::SurfOfExtrusion",
-                    ),
-                    _ => (
-                        HARNESS_ANALYTIC_EXPORT,
-                        "face surface of an analytic kind exported as its B-spline part",
-                    ),
-                };
-                return Some(Output::deferred(unit, symbol));
+                ));
             }
             if let Ok(Some(ed)) = eu1::edge(b, e) {
                 all_edges.push(ed);

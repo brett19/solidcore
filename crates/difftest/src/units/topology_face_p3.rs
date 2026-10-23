@@ -10,16 +10,14 @@
 //! compared as flags, statuses, tolerances, edge use / vertex use states and sampled
 //! curve points (see the FFI module docs for each op's output).
 //!
-//! **Inexact geometry.** The import holds an analytic `SmBSplineSurface` subclass other
-//! than `SmPlane` (cylinder, cone, sphere, torus, surface of revolution or extrusion) and
-//! an `SmBSplineCurve` subclass other than `SmLine` (ellipse, ...) only as its B-spline
-//! part. A geometric op (`LoopOrient` and later) on a B-rep holding such a kind is
-//! deferred to the unit that gives the kind its Rust representation: the `SurfaceKind`
-//! dispatch of `surface.surface_p2` for `SmCone` / `SmCylinder` / `SmSphere` / `SmTorus`
-//! (their own units are ported, but no `Surface` can hold them yet),
-//! `surface.surf_of_extrusion_p2` for the extrusion, `topology.brep_p7`
-//! (`SmBrep::ReadFromFile`) otherwise; the topological ops (`Lamina`, `SetTol`, `Notify`)
-//! are compared on every B-rep.
+//! **Inexact geometry.** Analytic face surfaces (cylinder, cone, sphere, torus, surface
+//! of revolution or extrusion) travel as their exact upstream record
+//! (`sc_analytic_export.h`) and are rebuilt by `Surface::read_from_db`, so both sides run
+//! the same kind. The import holds only the B-spline part of an analytic surface the
+//! export could not carry losslessly and of an `SmBSplineCurve` subclass other than
+//! `SmLine` (ellipse, ...); a geometric op (`LoopOrient` and later) on a B-rep holding
+//! such geometry is deferred as `harness:analytic-geometry-export`. The topological ops
+//! (`Lamina`, `SetTol`, `Notify`) are compared on every B-rep.
 //!
 //! Face, loop and other-face selectors are taken modulo the B-rep's counts, so
 //! generated cases need no counts; a B-rep without faces gives `no face` on both sides.
@@ -46,6 +44,7 @@ use solidcore::{EntityRef, SolidError};
 use solidcore_ffi::units::topology_face_p3::{self as ffi, Op, N_ARGS};
 use solidcore_ffi::units::topology_vertexuse::{self as fixture, Op as FixtureOp};
 
+use super::topology_edgeuse_p1::surface_class_name;
 use super::topology_vertexuse::{self as shared, BrepIn};
 use crate::{Case, HarnessError, Output, Rng, UnitDiff};
 
@@ -75,6 +74,10 @@ fn native_bspline_copy(curve: &SmCurve) -> Option<SmCurve> {
 const EXACT_SURFACES: [i64; 2] = [15002, 15011];
 /// `SmBSplineCurve_TYPE`, `SmLine_TYPE`: imported exactly.
 const EXACT_CURVES: [i64; 2] = [14033, 14010];
+
+/// The deferral label of geometry the shared B-rep export holds only as its B-spline part
+/// (a harness limitation, not an unported unit).
+const HARNESS_ANALYTIC_EXPORT: &str = "harness:analytic-geometry-export";
 
 /// "Upstream would dereference null" in an output slot.
 const NULL_DEREF: f64 = -2.0;
@@ -463,41 +466,30 @@ fn is_vertex_loop(b: &Brep, l: LoopId) -> bool {
 }
 
 /// The deferral of a geometric op on a B-rep holding a kind the import has only as its
-/// B-spline part (see the module docs).
-fn inexact_geometry(types: &[f64]) -> Result<Option<Output>, HarnessError> {
+/// B-spline part (see the module docs). `exact` is the import's per-face flag: an
+/// analytic face surface the shared export carries exactly (`sc_analytic_export.h`,
+/// rebuilt by `Surface::read_from_db`) is the upstream kind on both sides.
+fn inexact_geometry(types: &[f64], exact: &[bool]) -> Result<Option<Output>, HarnessError> {
     let bad = || harness("bad types export");
     let n_f = *types.get(1).ok_or_else(bad)? as usize;
     let surfaces = types.get(2..2 + n_f).ok_or_else(bad)?;
     let n_e = *types.get(2 + n_f).ok_or_else(bad)? as usize;
     let curves = types.get(3 + n_f..3 + n_f + n_e).ok_or_else(bad)?;
-    for &t in surfaces {
+    if exact.len() != n_f {
+        return Err(harness("types export does not match the imported faces"));
+    }
+    for (&t, &is_exact) in surfaces.iter().zip(exact) {
         let t = t as i64;
-        if t >= 0 && !EXACT_SURFACES.contains(&t) {
-            // The analytic kinds' own units (`surface.cone_p1`, `surface.sphere`,
-            // `surface.torus`) are ported; what is missing is their `SurfaceKind`
-            // variant, i.e. the `SmSurface` dispatch of `surface.surface_p2` (issue
-            // #76, the DISPATCH GAP of `Surface::read_from_db`).
-            let (unit, symbol) = match t {
-                15012 => ("surface.surface_p2", "SurfaceKind::Cone (SmCone dispatch)"),
-                15013 => (
-                    "surface.surface_p2",
-                    "SurfaceKind::Cone (SmCylinder dispatch)",
+        if t >= 0 && !EXACT_SURFACES.contains(&t) && !is_exact {
+            // the export declined this analytic surface's record (not lossless), so
+            // the import holds only its B-spline part
+            return Ok(Some(Output::deferred(
+                HARNESS_ANALYTIC_EXPORT,
+                format!(
+                    "{} face surface not exported exactly",
+                    surface_class_name(t)
                 ),
-                15014 => (
-                    "surface.surface_p2",
-                    "SurfaceKind::Sphere (SmSphere dispatch)",
-                ),
-                15015 => (
-                    "surface.surface_p2",
-                    "SurfaceKind::Torus (SmTorus dispatch)",
-                ),
-                15030 => (
-                "harness:analytic-geometry-export",
-                "SmSurfOfExtrusion face surface not exported exactly",
-            ),
-                _ => ("topology.brep_p7", "SmBrep::ReadFromFile"),
-            };
-            return Ok(Some(Output::deferred(unit, symbol)));
+            )));
         }
     }
     if curves
@@ -505,8 +497,8 @@ fn inexact_geometry(types: &[f64]) -> Result<Option<Output>, HarnessError> {
         .any(|&t| t >= 0.0 && !EXACT_CURVES.contains(&(t as i64)))
     {
         return Ok(Some(Output::deferred(
-            "topology.brep_p7",
-            "SmBrep::ReadFromFile",
+            HARNESS_ANALYTIC_EXPORT,
+            "edge curve of an analytic kind exported as its B-spline part",
         )));
     }
     Ok(None)
@@ -559,7 +551,7 @@ fn run_rust_case(i: &Inputs) -> Result<Output, HarnessError> {
         Ok(b) => b,
         Err(out) => return Ok(out),
     };
-    let (mut b, _) = shared::import(&built.export)?;
+    let (mut b, exact) = shared::import(&built.export)?;
     let Some(a) = args(&i.op, &built, |f| first_loop(&b, f)) else {
         return Ok(Output::err("no face"));
     };
@@ -570,7 +562,7 @@ fn run_rust_case(i: &Inputs) -> Result<Output, HarnessError> {
     if op as i32 >= Op::LoopOrient as i32 && !vertex_loop {
         let types = ffi::eval(Op::Types, &built.path, &built.block, &[])
             .map_err(|e| harness(format!("c++ types: {e}")))?;
-        if let Some(o) = inexact_geometry(&types)? {
+        if let Some(o) = inexact_geometry(&types, &exact)? {
             return Ok(o);
         }
     }

@@ -517,13 +517,10 @@ impl Target {
 
     /// Whether target face `f`'s surface is imported exactly.
     fn exact_face(&self, f: Option<FaceId>) -> bool {
-        f.and_then(|f| {
-            self.types
-                .face_surface_types
-                .get(f.index() as usize)
-                .copied()
-        })
-        .is_none_or(|t| t < 0 || EXACT_SURFACES.contains(&t))
+        // an analytic surface the export carried exactly (`sc_analytic_export.h`) is the
+        // upstream kind on both sides
+        f.and_then(|f| self.types.inexact_surface(f.index() as usize))
+            .is_none_or(|t| EXACT_SURFACES.contains(&t))
     }
 
     /// Whether target edge `e`'s curve is imported exactly.
