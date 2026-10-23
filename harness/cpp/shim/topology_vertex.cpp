@@ -22,6 +22,7 @@
 // pointer-to-member access), never the functions under test. Ops whose upstream path
 // would dereference null (or read an uninitialised value) output -2 instead of calling it.
 #include "sc_shim.h"
+#include "sc_analytic_export.h"
 #include "support/topology_fixture.h"
 
 
@@ -584,8 +585,14 @@ void put_surface(std::vector<double>& o, const SmSurface* s)
     }
     const SmBSplineSurface* b = (const SmBSplineSurface*)s;
     gw_SURFACE* sur = b->GetGwNurbPointer();
+    // An analytic subclass the Rust import rebuilds as its own kind (cone, cylinder, sphere,
+    // torus, revolution, extrusion) first travels as its exact database record
+    // (`2 type version surf_oob gen_oob nbytes bytes`, sc_analytic_export.h) when that is
+    // lossless; the regular block below follows either way (the importer checks the exact
+    // surface's B-spline part against it).
+    sc_analytic_export::put_exact_head(o, s, the_context());
     // `4 type` marks a subclass (cone, sphere, torus, revolution, extrusion, ...) exported as
-    // its B-spline part only; the block follows as for kind 0
+    // its B-spline part; the block follows as for kind 0
     if (s->GetType() != SmBSplineSurface_TYPE)
     {
         o.push_back(4.0);

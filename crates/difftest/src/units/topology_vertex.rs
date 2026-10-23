@@ -13,7 +13,10 @@
 //! as traversal indices, flags, statuses and values. `init_gaps` has the C++ side compute the cached
 //! gaps before the op, so that cached gaps and their resets are observable. A B-rep
 //! whose edges share a curve object, or whose edge curves are not B-splines or lines,
-//! is a harness error (the Rust side could not represent it).
+//! is a harness error (the Rust side could not represent it). Analytic face surfaces
+//! (cone, cylinder, sphere, torus, revolution, extrusion) travel as their exact upstream
+//! record (`sc_analytic_export.h`) and are rebuilt by `Surface::read_from_db`; when the
+//! export cannot carry one losslessly, the ops that solve against face surfaces defer.
 //!
 //! The vertex selector is taken modulo the vertex count (so generated cases need no
 //! counts); other selectors likewise, `-1` selecting null.
@@ -518,7 +521,30 @@ fn read_curve(rd: &mut Rd<'_>, uv: bool) -> Result<Option<SmCurve>, HarnessError
     Ok(Some(SmCurve::from(base)))
 }
 
+/// A face surface block: an exact analytic head (`2 ...`, the shim's
+/// `sc_analytic_export::put_exact_head`, read by [`crate::util::read_exact_surface`]) and
+/// the regular block after it, or the regular block alone. An analytic subclass without
+/// an exact head stays its B-spline part and is recorded in `rd.inexact`.
 fn read_surface(rd: &mut Rd<'_>) -> Result<Option<Surface>, HarnessError> {
+    if rd.v.get(rd.at) != Some(&2.0) {
+        return read_regular_surface(rd);
+    }
+    rd.at += 1;
+    let exact = crate::util::read_exact_surface(&mut || rd.num())?;
+    let before = rd.inexact;
+    let fallback = read_regular_surface(rd)?;
+    match exact {
+        Some(s) => {
+            crate::util::check_exact_base(&s, fallback.as_ref())?;
+            // the regular block's `4 type` marked it a subclass: the exact record replaces it
+            rd.inexact = before;
+            Ok(Some(s))
+        }
+        None => Ok(fallback),
+    }
+}
+
+fn read_regular_surface(rd: &mut Rd<'_>) -> Result<Option<Surface>, HarnessError> {
     let kind = rd.num()?;
     if kind == -1.0 {
         return Ok(None);
@@ -1534,26 +1560,20 @@ fn run_rust(i: &Inputs) -> Result<Output, HarnessError> {
         Ok(op) => op,
         Err(o) => return Ok(*o),
     };
-    // The gap, topological-vertex and pole queries solve against the face surfaces: a face
-    // surface the export holds only as its B-spline part (a cone, sphere, torus, revolution
-    // or extrusion subclass) is a stand-in whose solves differ from the analytic ones.
+    // The gap, topological-vertex and pole queries solve against the face surfaces. An
+    // analytic face surface normally travels as its exact record; one the export could not
+    // carry losslessly is held only as its B-spline part, a stand-in whose solves differ
+    // from the analytic ones.
     if let (Some(ty), OpIn::Gaps { .. } | OpIn::Topological { .. } | OpIn::OnPole { .. }) =
         (inexact, &op)
     {
-        let (unit, symbol) = match ty {
-            // the DISPATCH GAP of `Surface::read_from_db` (issue #76) belongs to
-            // `surface.surface_p2`, not to the analytic surface units (all green)
-            15012 => ("surface.surface_p2", "SurfaceKind::Cone (SmCone dispatch)"),
-            15013 => ("surface.surface_p2", "SurfaceKind::Cone (SmCylinder dispatch)"),
-            15014 => ("surface.surface_p2", "SurfaceKind::Sphere (SmSphere dispatch)"),
-            15015 => ("surface.surface_p2", "SurfaceKind::Torus (SmTorus dispatch)"),
-            15030 => (
-                "harness:analytic-geometry-export",
-                "SmSurfOfExtrusion face surface not exported exactly",
+        return Ok(Output::deferred(
+            "harness:analytic-geometry-export",
+            format!(
+                "{} face surface not exported exactly",
+                super::topology_edgeuse_p1::surface_class_name(ty)
             ),
-            _ => ("topology.brep_p10", "SmBrep::MakeTopologyFromData"),
-        };
-        return Ok(Output::deferred(unit, symbol));
+        ));
     }
     match run_rust_op(&mut b, &op) {
         Ok(o) => Ok(o),
